@@ -6554,6 +6554,13 @@ void OverviewController::commitOverviewExitFocus(const PHLWINDOW& window) {
     if (!alreadyFocused)
         focusWindowCompat(window, false, Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
+    // Raise the picked window to the top of its workspace's z-order.
+    // Without this, focus alone leaves it stacked behind any window that
+    // was on top before the overview opened — visible on overlapping
+    // floating layouts especially.
+    if (g_pCompositor)
+        g_pCompositor->changeWindowZOrder(window, true);
+
     recordWindowActivation(window, true);
     (void)syncScrollingWorkspaceSpotOnWindow(window);
 
