@@ -1621,6 +1621,7 @@ OverviewController::~OverviewController() {
     setInputFollowMouseOverride(false);
     setScrollingFollowFocusOverride(false);
     setAnimationsEnabledOverride(false);
+    setDamageTrackingOverride(false);
     deactivateHooks();
     if (m_changeWorkspaceHook)
         m_changeWorkspaceHook->unhook();
@@ -4794,6 +4795,42 @@ void OverviewController::setScrollingFollowFocusOverride(bool disable) {
     m_scrollingFollowFocusOverridden = false;
 }
 
+void OverviewController::setDamageTrackingOverride(bool disable) {
+    // Force `debug:damage_tracking = 0` while overview is active so Hyprland
+    // doesn't cull the scaled-down window previews when the cursor only
+    // damages a tiny region. Restored to the user's prior value on close.
+    // Documented in gfhdhytghd/hymission#2.
+    const auto* value = HyprlandAPI::getConfigValue(m_handle, "debug:damage_tracking");
+    if (!value)
+        return;
+
+    const auto* data = reinterpret_cast<Hyprlang::INT* const*>(value->getDataStaticPtr());
+    if (!data || !*data)
+        return;
+
+    if (disable) {
+        if (m_damageTrackingOverridden)
+            return;
+
+        m_damageTrackingBackup = static_cast<long>(**data);
+        if (m_damageTrackingBackup == 0)
+            return; // user already has it off, no-op
+
+        const auto err = g_pConfigManager->parseKeyword("debug:damage_tracking", "0");
+        if (!err.empty())
+            return;
+
+        m_damageTrackingOverridden = true;
+        return;
+    }
+
+    if (!m_damageTrackingOverridden)
+        return;
+
+    g_pConfigManager->parseKeyword("debug:damage_tracking", std::to_string(m_damageTrackingBackup));
+    m_damageTrackingOverridden = false;
+}
+
 void OverviewController::setAnimationsEnabledOverride(bool disable, std::optional<std::chrono::milliseconds> restoreDelay) {
     const auto* value = HyprlandAPI::getConfigValue(m_handle, "animations:enabled");
     if (!value)
@@ -7520,6 +7557,7 @@ CRegion OverviewController::transformRegionForWindow(const PHLWINDOW& window, co
 
 void OverviewController::beginOpen(const PHLMONITOR& monitor, ScopeOverride requestedScope) {
     setAnimationsEnabledOverride(false);
+    setDamageTrackingOverride(true);
     clearToggleSwitchSession();
 
     const auto buildStart = std::chrono::steady_clock::now();
@@ -7827,6 +7865,7 @@ void OverviewController::beginClose(CloseMode mode, std::optional<double> fromVi
 }
 
 void OverviewController::deactivate() {
+    setDamageTrackingOverride(false);
     const auto monitor = m_state.ownerMonitor;
     const auto ownedMonitors = m_state.participatingMonitors;
     const auto fullscreenActiveOriginal = m_fullscreenActiveOriginal;

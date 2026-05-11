@@ -432,6 +432,12 @@ class OverviewController {
     void                       setInputFollowMouseOverride(bool disable);
     void                       setScrollingFollowFocusOverride(bool disable);
     void                       setAnimationsEnabledOverride(bool disable, std::optional<std::chrono::milliseconds> restoreDelay = std::nullopt);
+    // Temporarily force `debug:damage_tracking = 0` while overview is active.
+    // Hyprland's damage tracking culls scaled overview windows when the cursor
+    // damage region doesn't intersect the (downscaled) tile box, causing
+    // colorful noise / flicker on mouse hover. Documented upstream in
+    // gfhdhytghd/hymission#2 — patch was never merged.
+    void                       setDamageTrackingOverride(bool disable);
     void                       applyWorkspaceNameOverrides(const State& state);
     void                       restoreWorkspaceNameOverrides();
     void                       clearRegisteredTrackpadGestures();
@@ -595,6 +601,8 @@ class OverviewController {
                       bool keepEmptyParticipatingMonitors = false, bool suppressWorkspaceStrip = false, PHLWINDOW preferredSelectedWindow = {}) const;
     State  m_state;
     HANDLE m_handle = nullptr;
+    bool   m_damageTrackingOverridden = false;
+    long   m_damageTrackingBackup     = 2; // Hyprland default
 
     CFunctionHook*            m_surfaceTexBoxHook = nullptr;
     CFunctionHook*            m_surfaceBoundingBoxHook = nullptr;
