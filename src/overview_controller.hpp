@@ -742,6 +742,7 @@ class OverviewController {
     bool                     m_stripSnapshotRefreshScheduled = false;
     bool                     m_primaryButtonPressed = false;
     bool                     m_closeButtonPressLatched = false; // swallow release after close-button click
+    bool                     m_closeCursorOverride = false;     // forcing the "pointer" cursor while hover
     std::optional<std::size_t> m_pressedStripIndex;
     std::optional<std::size_t> m_pressedWindowIndex;
     std::optional<std::size_t> m_draggedWindowIndex;
