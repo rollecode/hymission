@@ -27,6 +27,7 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 
 #include "mission_layout.hpp"
@@ -169,7 +170,9 @@ class OverviewController {
 
     struct WorkspaceStripEntry {
         struct Snapshot {
-            CFramebuffer framebuffer;
+            // 0.55: IFramebuffer is now abstract; use the concrete CGLFramebuffer
+            // via SP. Some places need the raw impl; SP keeps lifetime managed.
+            SP<Render::GL::CGLFramebuffer> framebuffer;
         };
 
         struct WindowPreview {
@@ -358,8 +361,8 @@ class OverviewController {
         Rect       capturedRectGlobal;
         Rect       proxyRectGlobal;
         Vector2D   snapshotSize;
-        SP<CFramebuffer> framebuffer;
-        std::array<SP<CFramebuffer>, 4> blurredFramebuffers;
+        SP<Render::IFramebuffer> framebuffer;
+        std::array<SP<Render::IFramebuffer>, 4> blurredFramebuffers;
     };
 
     using SurfaceGetTexBoxFn = CBox (*)(void*);

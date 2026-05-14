@@ -35,6 +35,8 @@
 #include <hyprland/src/devices/IKeyboard.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/config/legacy/ConfigManager.hpp>
+#include <hyprland/src/config/shared/workspace/WorkspaceRuleManager.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/helpers/MiscFunctions.hpp>
@@ -64,27 +66,61 @@
 
 namespace hymission {
 
+// TODO(0.55-port): Hyprland 0.55 made CHyprOpenGLImpl::m_renderData private
+// (the previous public struct exposing pMonitor/currentWindow/blockScreenShader
+// is gone). These shims keep call sites compiling. They lose the render-time
+// context, so any feature that depended on knowing "which window is currently
+// being rendered" no longer works. The plugin still loads and basic dispatcher
+// flow works; overview rendering quality is degraded until the port covers
+// the new render-pass API.
+// IFramebuffer is the new abstract base; getFBID is on the GL concrete class.
+inline GLuint fbidOf(Render::IFramebuffer& fb) {
+    return static_cast<Render::GL::CGLFramebuffer&>(fb).getFBID();
+}
+
+namespace render_shim {
+    inline PHLMONITOR currentMonitor() {
+        return Desktop::focusState() ? Desktop::focusState()->monitor() : PHLMONITOR{};
+    }
+    struct PMonitorProxy {
+        PHLMONITOR ptr;
+        explicit operator bool() const { return static_cast<bool>(ptr); }
+        PHLMONITOR lock() const { return ptr; }
+    };
+    inline PMonitorProxy pMonitor() { return {currentMonitor()}; }
+    struct PWindowProxy {
+        PHLWINDOW ptr;
+        PHLWINDOW lock() const { return ptr; }
+    };
+    inline PWindowProxy currentWindow() { return {}; }
+    inline bool& blockScreenShader() {
+        static bool stub = false;
+        return stub;
+    }
+}
+
 class OverviewOverlayPassElement final : public IPassElement {
   public:
     OverviewOverlayPassElement(OverviewController* controller, const PHLMONITOR& monitor) : m_controller(controller), m_monitor(monitor) {
     }
 
-    void draw(const CRegion& damage) override {
-        (void)damage;
-
-        const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    std::vector<UP<IPassElement>> draw() override {
+        const auto renderMonitor = render_shim::pMonitor().lock();
         if (!m_controller || !renderMonitor)
-            return;
+            return {};
 
         const auto expectedMonitor = m_monitor.lock();
         if (!expectedMonitor || renderMonitor != expectedMonitor)
-            return;
+            return {};
 
         m_controller->renderHiddenStripLayerProxies();
         m_controller->renderSelectionChrome();
         m_controller->renderCloseButtons();
         m_controller->renderWorkspaceStrip();
+        return {};
     }
+
+    ePassElementType type() override { return EK_CUSTOM; }
 
     bool needsLiveBlur() override {
         return false;
@@ -597,16 +633,14 @@ Rect rectToMonitorRenderLocal(const Rect& rect, const PHLMONITOR& monitor) {
     return scaleRectForRender(rectToMonitorLocal(rect, monitor), monitor);
 }
 
-CFramebuffer* layerFramebufferFor(const PHLLS& layer) {
-    if (!layer || !Render::GL::g_pHyprOpenGL)
-        return nullptr;
-
-    const auto it = std::find_if(Render::GL::g_pHyprOpenGL->m_layerFramebuffers.begin(), Render::GL::g_pHyprOpenGL->m_layerFramebuffers.end(),
-                                 [&](const auto& entry) { return entry.first.lock() == layer; });
-    return it == Render::GL::g_pHyprOpenGL->m_layerFramebuffers.end() ? nullptr : &it->second;
+Render::IFramebuffer* layerFramebufferFor(const PHLLS& /*layer*/) {
+    // TODO(0.55): m_layerFramebuffers is no longer publicly accessible on
+    // CHyprOpenGLImpl. Returning nullptr disables hymission's per-layer
+    // blur capture; the rest of the overview still works.
+    return nullptr;
 }
 
-void setTextureLinearFiltering(const SP<CTexture>& texture) {
+void setTextureLinearFiltering(const SP<Render::ITexture>& texture) {
     if (!texture)
         return;
 
@@ -614,7 +648,7 @@ void setTextureLinearFiltering(const SP<CTexture>& texture) {
     texture->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 }
 
-void setFramebufferLinearFiltering(CFramebuffer& framebuffer) {
+void setFramebufferLinearFiltering(Render::IFramebuffer& framebuffer) {
     setTextureLinearFiltering(framebuffer.getTexture());
 }
 
@@ -647,7 +681,7 @@ std::optional<FramebufferBlitRect> rectToFramebufferBlitRect(const Rect& rect, c
     };
 }
 
-bool blitFramebufferRegion(CFramebuffer& sourceFramebuffer, CFramebuffer& targetFramebuffer, const Rect& sourceRect, const Rect& targetRect) {
+bool blitFramebufferRegion(Render::IFramebuffer& sourceFramebuffer, Render::IFramebuffer& targetFramebuffer, const Rect& sourceRect, const Rect& targetRect) {
     if (!sourceFramebuffer.isAllocated() || !targetFramebuffer.isAllocated())
         return false;
 
@@ -666,12 +700,12 @@ bool blitFramebufferRegion(CFramebuffer& sourceFramebuffer, CFramebuffer& target
     glGetFloatv(GL_COLOR_CLEAR_VALUE, previousClearColor);
 
     glDisable(GL_SCISSOR_TEST);
-    glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer.getFBID());
+    glBindFramebuffer(GL_FRAMEBUFFER, fbidOf(targetFramebuffer));
     glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFramebuffer.getFBID());
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebuffer.getFBID());
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbidOf(sourceFramebuffer));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbidOf(targetFramebuffer));
     glBlitFramebuffer(sourceBlitRect->left, sourceBlitRect->bottom, sourceBlitRect->right, sourceBlitRect->top, targetBlitRect->left, targetBlitRect->bottom,
                       targetBlitRect->right, targetBlitRect->top, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
@@ -686,26 +720,16 @@ bool blitFramebufferRegion(CFramebuffer& sourceFramebuffer, CFramebuffer& target
     return glGetError() == GL_NO_ERROR;
 }
 
-bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, CFramebuffer& targetFramebuffer, const SP<CTexture>& texture, const CBox& destinationBox) {
-    if (!monitor || !g_pHyprRenderer || !Render::GL::g_pHyprOpenGL || !texture || !targetFramebuffer.isAllocated())
-        return false;
-
-    setTextureLinearFiltering(texture);
-    setFramebufferLinearFiltering(targetFramebuffer);
-
-    const bool previousBlockScreenShader = Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader;
-    CRegion     fakeDamage{0, 0, targetFramebuffer.m_size.x, targetFramebuffer.m_size.y};
-    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &targetFramebuffer)) {
-        Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockScreenShader;
-        return false;
-    }
-
-    Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = true;
-    Render::GL::g_pHyprOpenGL->clear(CHyprColor{0.0, 0.0, 0.0, 0.0});
-    Render::GL::g_pHyprOpenGL->renderTexture(texture, destinationBox, {.a = 1.0F});
-    g_pHyprRenderer->endRender();
-    Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockScreenShader;
-    return true;
+bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, Render::IFramebuffer& targetFramebuffer, const SP<Render::ITexture>& texture, const CBox& destinationBox) {
+    // TODO(0.55): beginRender now takes SP<IFramebuffer> instead of a raw
+    // pointer to a stack-owned framebuffer. Wiring this requires a non-owning
+    // SP wrapper to satisfy the signature without taking ownership. Skipped;
+    // overview tile capture (offscreen blur) is disabled until ported.
+    (void)monitor;
+    (void)targetFramebuffer;
+    (void)texture;
+    (void)destinationBox;
+    return false;
 }
 
 struct GaussianBlurPipeline {
@@ -756,7 +780,7 @@ bool ensureGaussianBlurPipeline() {
     if (!g_pHyprRenderer)
         return false;
 
-    g_pHyprRenderer->makeEGLCurrent();
+    // TODO(0.55): makeEGLCurrent removed; renderer manages EGL context now.
 
     static constexpr char kVertexSource[] = R"(#version 320 es
 precision highp float;
@@ -849,7 +873,7 @@ void destroyGaussianBlurPipeline() {
         return;
 
     if (g_pHyprRenderer)
-        g_pHyprRenderer->makeEGLCurrent();
+        // TODO(0.55): makeEGLCurrent removed; renderer manages EGL context now.
 
     if (pipeline.vbo)
         glDeleteBuffers(1, &pipeline.vbo);
@@ -864,7 +888,7 @@ void destroyGaussianBlurPipeline() {
     pipeline = {};
 }
 
-bool renderGaussianBlurPass(CFramebuffer& sourceFramebuffer, CFramebuffer& targetFramebuffer, const Vector2D& direction, float radius) {
+bool renderGaussianBlurPass(Render::IFramebuffer& sourceFramebuffer, Render::IFramebuffer& targetFramebuffer, const Vector2D& direction, float radius) {
     if (!ensureGaussianBlurPipeline() || !sourceFramebuffer.isAllocated() || !targetFramebuffer.isAllocated())
         return false;
 
@@ -894,7 +918,7 @@ bool renderGaussianBlurPass(CFramebuffer& sourceFramebuffer, CFramebuffer& targe
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture0);
     glGetIntegerv(GL_VIEWPORT, previousViewport);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer.getFBID());
+    glBindFramebuffer(GL_FRAMEBUFFER, fbidOf(targetFramebuffer));
     glViewport(0, 0, static_cast<GLsizei>(std::lround(targetFramebuffer.m_size.x)), static_cast<GLsizei>(std::lround(targetFramebuffer.m_size.y)));
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
@@ -931,16 +955,16 @@ bool renderGaussianBlurPass(CFramebuffer& sourceFramebuffer, CFramebuffer& targe
     return true;
 }
 
-bool buildBlurredProxyFramebuffers(const SP<CFramebuffer>& sourceFramebuffer, const std::array<SP<CFramebuffer>, 4>& blurredFramebuffers) {
+bool buildBlurredProxyFramebuffers(const SP<Render::IFramebuffer>& sourceFramebuffer, const std::array<SP<Render::IFramebuffer>, 4>& blurredFramebuffers) {
     if (!g_pHyprRenderer || !sourceFramebuffer || !sourceFramebuffer->isAllocated())
         return false;
 
-    g_pHyprRenderer->makeEGLCurrent();
+    // TODO(0.55): makeEGLCurrent removed; renderer manages EGL context now.
 
     const int framebufferWidth = static_cast<int>(std::lround(sourceFramebuffer->m_size.x));
     const int framebufferHeight = static_cast<int>(std::lround(sourceFramebuffer->m_size.y));
-    CFramebuffer horizontalFramebuffer;
-    CFramebuffer verticalFramebuffer;
+    Render::GL::CGLFramebuffer horizontalFramebuffer;
+    Render::GL::CGLFramebuffer verticalFramebuffer;
     if (!horizontalFramebuffer.alloc(framebufferWidth, framebufferHeight) || !verticalFramebuffer.alloc(framebufferWidth, framebufferHeight))
         return false;
     setFramebufferLinearFiltering(horizontalFramebuffer);
@@ -950,7 +974,7 @@ bool buildBlurredProxyFramebuffers(const SP<CFramebuffer>& sourceFramebuffer, co
     constexpr float              kGaussianStepRadius = 1.35F;
     std::size_t                  blurLevelIndex = 0;
     int                          completedIterations = 0;
-    CFramebuffer*                currentSource = sourceFramebuffer.get();
+    Render::IFramebuffer*                currentSource = sourceFramebuffer.get();
 
     while (blurLevelIndex < blurredFramebuffers.size()) {
         if (!blurredFramebuffers[blurLevelIndex] || !blurredFramebuffers[blurLevelIndex]->isAllocated())
@@ -2011,7 +2035,7 @@ void OverviewController::renderStage(eRenderStage stage) {
     if (!isVisible())
         return;
 
-    const auto monitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto monitor = render_shim::pMonitor().lock();
     if (!monitor || !ownsMonitor(monitor))
         return;
 
@@ -2567,7 +2591,7 @@ void OverviewController::borderDrawHook(void* borderDecorationThisptr, const PHL
         return;
     }
 
-    const auto window = Render::GL::g_pHyprOpenGL->m_renderData.currentWindow.lock();
+    const auto window = render_shim::currentWindow().lock();
     if (!window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window) || previewMonitorForWindow(window) != monitor) {
         m_borderDrawOriginal(borderDecorationThisptr, monitor, alpha);
         return;
@@ -2579,7 +2603,7 @@ void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHL
         return;
     }
 
-    const auto window = Render::GL::g_pHyprOpenGL->m_renderData.currentWindow.lock();
+    const auto window = render_shim::currentWindow().lock();
     if (!window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window) || previewMonitorForWindow(window) != monitor) {
         m_shadowDrawOriginal(shadowDecorationThisptr, monitor, alpha);
         return;
@@ -2591,7 +2615,7 @@ void OverviewController::hyprbarsDrawHook(void* hyprbarsThisptr, const PHLMONITO
         return;
     }
 
-    const auto window = Render::GL::g_pHyprOpenGL->m_renderData.currentWindow.lock();
+    const auto window = render_shim::currentWindow().lock();
     if (!window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window) || previewMonitorForWindow(window) != monitor) {
         m_hyprbarsDrawOriginal(hyprbarsThisptr, monitor, alpha);
         return;
@@ -3140,9 +3164,9 @@ ScrollingLayoutDirection OverviewController::scrollingLayoutDirection() const {
     std::string direction = getConfigString(m_handle, "scrolling:direction", "right");
 
     if (const auto workspace = activeLayoutWorkspace(); workspace) {
-        const auto workspaceRule = Config::mgr()->getWorkspaceRuleFor(workspace);
-        if (workspaceRule.layoutopts.contains("direction") && !workspaceRule.layoutopts.at("direction").empty())
-            direction = workspaceRule.layoutopts.at("direction");
+        const auto workspaceRule = Config::workspaceRuleMgr()->getWorkspaceRuleFor(workspace);
+        if (workspaceRule && workspaceRule->m_layoutopts.contains("direction") && !workspaceRule->m_layoutopts.at("direction").empty())
+            direction = workspaceRule->m_layoutopts.at("direction");
     }
 
     return parseScrollingLayoutDirection(direction);
@@ -4524,7 +4548,7 @@ void OverviewController::requestOverviewWorkspaceTransitionCommit(bool followGes
     if (!m_workspaceTransition.active)
         return;
 
-    if (!(Render::GL::g_pHyprOpenGL && Render::GL::g_pHyprOpenGL->m_renderData.pMonitor)) {
+    if (!(Render::GL::g_pHyprOpenGL && render_shim::pMonitor())) {
         commitOverviewWorkspaceTransition(followGesture);
         return;
     }
@@ -4557,7 +4581,7 @@ void OverviewController::requestOverviewWorkspaceTransitionCommit(bool followGes
         // Workspace transition commit mutates live workspace/window ownership.
         // If a frame is still rendering, reschedule instead of tearing the render
         // state mid-frame.
-        if (Render::GL::g_pHyprOpenGL && Render::GL::g_pHyprOpenGL->m_renderData.pMonitor) {
+        if (Render::GL::g_pHyprOpenGL && render_shim::pMonitor()) {
             requestOverviewWorkspaceTransitionCommit(followGesture);
             return;
         }
@@ -4784,7 +4808,7 @@ void OverviewController::setInputFollowMouseOverride(bool disable) {
             return;
 
         m_inputFollowMouseBackup = static_cast<long>(**data);
-        const auto err = Config::mgr()->parseKeyword("input:follow_mouse", "0");
+        const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("input:follow_mouse", "0");
         if (!err.empty()) {
             notify("[hymission] failed to disable input:follow_mouse", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
             return;
@@ -4797,7 +4821,7 @@ void OverviewController::setInputFollowMouseOverride(bool disable) {
     if (!m_inputFollowMouseOverridden)
         return;
 
-    const auto err = Config::mgr()->parseKeyword("input:follow_mouse", std::to_string(m_inputFollowMouseBackup));
+    const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("input:follow_mouse", std::to_string(m_inputFollowMouseBackup));
     if (!err.empty()) {
         notify("[hymission] failed to restore input:follow_mouse", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         return;
@@ -4826,7 +4850,7 @@ void OverviewController::setScrollingFollowFocusOverride(bool disable) {
             return;
 
         m_scrollingFollowFocusBackup = static_cast<long>(**data);
-        const auto err = Config::mgr()->parseKeyword("scrolling:follow_focus", "0");
+        const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("scrolling:follow_focus", "0");
         if (!err.empty()) {
             notify("[hymission] failed to disable scrolling:follow_focus", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
             return;
@@ -4839,7 +4863,7 @@ void OverviewController::setScrollingFollowFocusOverride(bool disable) {
     if (!m_scrollingFollowFocusOverridden)
         return;
 
-    const auto err = Config::mgr()->parseKeyword("scrolling:follow_focus", std::to_string(m_scrollingFollowFocusBackup));
+    const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("scrolling:follow_focus", std::to_string(m_scrollingFollowFocusBackup));
     if (!err.empty()) {
         notify("[hymission] failed to restore scrolling:follow_focus", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         return;
@@ -4869,7 +4893,7 @@ void OverviewController::setDamageTrackingOverride(bool disable) {
         if (m_damageTrackingBackup == 0)
             return; // user already has it off, no-op
 
-        const auto err = Config::mgr()->parseKeyword("debug:damage_tracking", "0");
+        const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("debug:damage_tracking", "0");
         if (!err.empty())
             return;
 
@@ -4880,7 +4904,7 @@ void OverviewController::setDamageTrackingOverride(bool disable) {
     if (!m_damageTrackingOverridden)
         return;
 
-    Config::mgr()->parseKeyword("debug:damage_tracking", std::to_string(m_damageTrackingBackup));
+    static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("debug:damage_tracking", std::to_string(m_damageTrackingBackup));
     m_damageTrackingOverridden = false;
 }
 
@@ -4899,7 +4923,7 @@ void OverviewController::setAnimationsEnabledOverride(bool disable, std::optiona
             if (m_animationsEnabledBackup == 0)
                 return;
 
-            const auto err = Config::mgr()->parseKeyword("animations:enabled", "0");
+            const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("animations:enabled", "0");
             if (!err.empty()) {
                 notify("[hymission] failed to disable animations:enabled", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
                 return;
@@ -4939,7 +4963,7 @@ void OverviewController::setAnimationsEnabledOverride(bool disable, std::optiona
     if (!m_animationsEnabledOverridden)
         return;
 
-    const auto err = Config::mgr()->parseKeyword("animations:enabled", std::to_string(m_animationsEnabledBackup));
+    const auto err = static_cast<Config::Legacy::CConfigManager*>(Config::mgr().get())->parseKeyword("animations:enabled", std::to_string(m_animationsEnabledBackup));
     if (!err.empty()) {
         notify("[hymission] failed to restore animations:enabled", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         return;
@@ -5398,7 +5422,7 @@ bool OverviewController::shouldSyncRealFocusDuringOverview() const {
 }
 
 bool OverviewController::insideRenderLifecycle() const {
-    return m_surfaceRenderDataTransformDepth > 0 || m_stripSnapshotRenderDepth > 0 || (Render::GL::g_pHyprOpenGL && Render::GL::g_pHyprOpenGL->m_renderData.pMonitor);
+    return m_surfaceRenderDataTransformDepth > 0 || m_stripSnapshotRenderDepth > 0 || (Render::GL::g_pHyprOpenGL && render_shim::pMonitor());
 }
 
 bool OverviewController::ownsMonitor(const PHLMONITOR& monitor) const {
@@ -5820,9 +5844,9 @@ std::optional<Vector2D> OverviewController::predictedScrollingExitTranslation(co
         return Vector2D{};
 
     auto direction = getConfigString(m_handle, "scrolling:direction", "right");
-    const auto workspaceRule = Config::mgr()->getWorkspaceRuleFor(window->m_workspace);
-    if (workspaceRule.layoutopts.contains("direction") && !workspaceRule.layoutopts.at("direction").empty())
-        direction = workspaceRule.layoutopts.at("direction");
+    const auto workspaceRule = Config::workspaceRuleMgr()->getWorkspaceRuleFor(window->m_workspace);
+    if (workspaceRule && workspaceRule->m_layoutopts.contains("direction") && !workspaceRule->m_layoutopts.at("direction").empty())
+        direction = workspaceRule->m_layoutopts.at("direction");
 
     const bool vertical = direction == "down" || direction == "up";
     const auto workArea = window->m_workspace->m_space->workArea();
@@ -6065,7 +6089,7 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
     const int fbWidth = std::max(1, static_cast<int>(std::ceil(proxyRectGlobal.width * renderScaleForMonitor(monitor))));
     const int fbHeight = std::max(1, static_cast<int>(std::ceil(proxyRectGlobal.height * renderScaleForMonitor(monitor))));
 
-    g_pHyprRenderer->makeEGLCurrent();
+    // TODO(0.55): makeEGLCurrent removed; renderer manages EGL context now.
     g_pHyprRenderer->makeSnapshot(layer);
     auto* sourceFramebuffer = layerFramebufferFor(layer);
     if (!sourceFramebuffer || !sourceFramebuffer->isAllocated() || !sourceFramebuffer->getTexture()) {
@@ -6085,9 +6109,9 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
         proxy.capturedRectGlobal = capturedRectGlobal;
         proxy.proxyRectGlobal = proxyRectGlobal;
         proxy.snapshotSize = Vector2D{static_cast<double>(fbWidth), static_cast<double>(fbHeight)};
-        proxy.framebuffer = makeShared<CFramebuffer>();
+        proxy.framebuffer = makeShared<Render::GL::CGLFramebuffer>();
         for (auto& blurredFramebuffer : proxy.blurredFramebuffers)
-            blurredFramebuffer = makeShared<CFramebuffer>();
+            blurredFramebuffer = makeShared<Render::GL::CGLFramebuffer>();
         m_hiddenStripLayerProxies.push_back(std::move(proxy));
         existing = &m_hiddenStripLayerProxies.back();
     }
@@ -6096,10 +6120,10 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
     existing->proxyRectGlobal = proxyRectGlobal;
     existing->snapshotSize = Vector2D{static_cast<double>(fbWidth), static_cast<double>(fbHeight)};
     if (!existing->framebuffer)
-        existing->framebuffer = makeShared<CFramebuffer>();
+        existing->framebuffer = makeShared<Render::GL::CGLFramebuffer>();
     for (auto& blurredFramebuffer : existing->blurredFramebuffers) {
         if (!blurredFramebuffer)
-            blurredFramebuffer = makeShared<CFramebuffer>();
+            blurredFramebuffer = makeShared<Render::GL::CGLFramebuffer>();
     }
 
     if (!existing->framebuffer->isAllocated() || std::abs(existing->framebuffer->m_size.x - fbWidth) > 0.5 || std::abs(existing->framebuffer->m_size.y - fbHeight) > 0.5) {
@@ -6151,7 +6175,7 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
 
     Rect         sourceRect = makeRect(0.0, 0.0, sourceFramebuffer->m_size.x, sourceFramebuffer->m_size.y);
     Rect         targetRect = makeRect(targetOffsetX, targetOffsetY, sourceFramebuffer->m_size.x, sourceFramebuffer->m_size.y);
-    CFramebuffer croppedFramebuffer;
+    Render::GL::CGLFramebuffer croppedFramebuffer;
     bool         useCroppedFramebuffer = false;
     if (sourceMatchesProxy) {
         targetRect = makeRect(0.0, 0.0, sourceFramebuffer->m_size.x, sourceFramebuffer->m_size.y);
@@ -6305,7 +6329,7 @@ void OverviewController::renderHiddenStripLayerProxies() const {
     if (m_hiddenStripLayerProxies.empty() || !Render::GL::g_pHyprOpenGL || !hideBarAnimationEffectsEnabled())
         return;
 
-    const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto renderMonitor = render_shim::pMonitor().lock();
     if (!renderMonitor)
         return;
 
@@ -6598,7 +6622,7 @@ void OverviewController::requestCloseHoveredWindow() {
     auto window = m_state.windows[*m_state.hoveredCloseIndex].window;
     if (!window || !g_pCompositor)
         return;
-    g_pCompositor->closeWindow(window);
+    window->sendClose();
 }
 
 double OverviewController::visualProgress() const {
@@ -8281,7 +8305,7 @@ void OverviewController::scheduleDeactivate() {
         if (!m_deactivatePending || !isVisible())
             return;
 
-        if (Render::GL::g_pHyprOpenGL && Render::GL::g_pHyprOpenGL->m_renderData.pMonitor) {
+        if (Render::GL::g_pHyprOpenGL && render_shim::pMonitor()) {
             scheduleDeactivate();
             return;
         }
@@ -9282,7 +9306,7 @@ void OverviewController::renderBackdrop() const {
     if (alpha <= 0.0)
         return;
 
-    const auto monitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto monitor = render_shim::pMonitor().lock();
     if (!monitor)
         return;
 
@@ -9302,7 +9326,7 @@ void OverviewController::renderSelectionChrome() const {
     if (progress <= 0.0)
         return;
 
-    const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto renderMonitor = render_shim::pMonitor().lock();
     if (!renderMonitor)
         return;
 
@@ -9320,15 +9344,8 @@ void OverviewController::renderSelectionChrome() const {
         const Rect  rect = rectToMonitorRenderLocal(rectGlobal, renderMonitor);
         renderOutline(rectGlobal, CHyprColor(0.24, 0.78, 1.0, 0.95 * progress), OUTLINE_THICKNESS);
 
-        auto texture =
-            Render::GL::g_pHyprOpenGL->renderText(window.title, CHyprColor(1.0, 1.0, 1.0, std::min(1.0, progress)), scaleFontSizeForRender(renderMonitor, 16), false, "",
-                                      static_cast<int>(rect.width));
-        if (texture) {
-            const Rect titleRect =
-                makeRect(rect.x, std::max(scaleLengthForRender(renderMonitor, 8.0), rect.y - texture->m_size.y - scaleLengthForRender(renderMonitor, TITLE_PADDING)),
-                         texture->m_size.x, texture->m_size.y);
-            Render::GL::g_pHyprOpenGL->renderTexture(texture, toBox(titleRect), {});
-        }
+        // TODO(0.55): g_pHyprOpenGL->renderText was removed. Overview tile
+        // titles disabled until a new text-rendering API is wired in.
     }
 
     if (m_draggedWindowIndex && *m_draggedWindowIndex < m_state.windows.size() && m_state.windows[*m_draggedWindowIndex].targetMonitor == renderMonitor) {
@@ -9350,7 +9367,7 @@ void OverviewController::renderCloseButtons() const {
     if (progress <= 0.0 || m_state.phase != Phase::Active)
         return;
 
-    const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto renderMonitor = render_shim::pMonitor().lock();
     if (!renderMonitor)
         return;
 
@@ -9375,7 +9392,7 @@ void OverviewController::renderCloseButtons() const {
         const bool hovered   = m_state.hoveredCloseIndex && *m_state.hoveredCloseIndex == index;
 
         // Disk: square rect rounded to half its side becomes a circle.
-        CHyprOpenGLImpl::SRectRenderData circleData{};
+        Render::GL::CHyprOpenGLImpl::SRectRenderData circleData{};
         circleData.round = static_cast<int>(std::round(rectLocal.width * 0.5));
         Render::GL::g_pHyprOpenGL->renderRect(toBox(rectLocal), hovered ? hoverFill : idleFill, circleData);
 
@@ -9407,7 +9424,7 @@ void OverviewController::renderCloseButtons() const {
 }
 
 void OverviewController::renderOutline(const Rect& rect, const CHyprColor& color, double thickness) const {
-    const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto renderMonitor = render_shim::pMonitor().lock();
     if (!renderMonitor)
         return;
 
@@ -9444,7 +9461,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
 
     const int fbWidth = std::max(1, static_cast<int>(std::ceil(thumb.width * entry.monitor->m_scale)));
     const int fbHeight = std::max(1, static_cast<int>(std::ceil(thumb.height * entry.monitor->m_scale)));
-    using RenderWorkspaceFn = void (*)(CHyprRenderer*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&, const CBox&);
+    using RenderWorkspaceFn = void (*)(Render::IHyprRenderer*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&, const CBox&);
 
     static RenderWorkspaceFn renderWorkspaceFn = nullptr;
     static bool renderWorkspaceResolved = false;
@@ -9460,9 +9477,10 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     if (!targetWorkspace && !entry.syntheticEmpty)
         return;
     auto snapshot = std::make_shared<WorkspaceStripEntry::Snapshot>();
-    if (!snapshot->framebuffer.alloc(fbWidth, fbHeight))
+    snapshot->framebuffer = makeShared<Render::GL::CGLFramebuffer>();
+    if (!snapshot->framebuffer->alloc(fbWidth, fbHeight))
         return;
-    setFramebufferLinearFiltering(snapshot->framebuffer);
+    setFramebufferLinearFiltering(*snapshot->framebuffer);
 
     State previewState;
     bool  renderWorkspaceContents = false;
@@ -9507,7 +9525,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     const auto previousWorkspace = monitor->m_activeWorkspace;
     const auto previousSpecialWorkspace = monitor->m_activeSpecialWorkspace;
     const bool previousBlockSurfaceFeedback = g_pHyprRenderer->m_bBlockSurfaceFeedback;
-    const bool previousBlockScreenShader = Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader;
+    const bool previousBlockScreenShader = render_shim::blockScreenShader();
     bool targetVisibilityChanged = false;
     bool previousVisibilityChanged = false;
     bool targetAnimationActivated = false;
@@ -9565,24 +9583,17 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         }
     };
 
-    const auto renderBackgroundLayersIntoFramebuffer = [&](CFramebuffer& targetFramebuffer, const Time::steady_tp& now) -> bool {
-        const bool previousBlockScreenShaderLocal = Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader;
-        CRegion     fakeDamage{0, 0, static_cast<int>(std::lround(targetFramebuffer.m_size.x)), static_cast<int>(std::lround(targetFramebuffer.m_size.y))};
-        if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &targetFramebuffer)) {
-            Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockScreenShaderLocal;
-            return false;
-        }
-
-        Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = true;
-        Render::GL::g_pHyprOpenGL->clear(CHyprColor{0.05, 0.06, 0.08, 1.0});
-        renderBackgroundLayers(now);
-        g_pHyprRenderer->endRender();
-        Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockScreenShaderLocal;
-        return true;
+    const auto renderBackgroundLayersIntoFramebuffer = [&](Render::IFramebuffer& targetFramebuffer, const Time::steady_tp& now) -> bool {
+        // TODO(0.55): beginRender(monitor, damage, mode, buffer, fb) now expects
+        // SP<IFramebuffer>, not a raw pointer. Stub until ported; thumbnails
+        // fall back to live workspace render.
+        (void)targetFramebuffer;
+        (void)now;
+        return false;
     };
 
     ++m_stripSnapshotRenderDepth;
-    g_pHyprRenderer->makeEGLCurrent();
+    // TODO(0.55): makeEGLCurrent removed; renderer manages EGL context now.
     g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
     if (renderWorkspaceContents) {
         m_stripPreviewContext.active = true;
@@ -9620,26 +9631,22 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     if (!renderWorkspaceContents) {
         const int backgroundFbWidth = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.x) * renderScaleForMonitor(monitor))));
         const int backgroundFbHeight = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.y) * renderScaleForMonitor(monitor))));
-        CFramebuffer backgroundFramebuffer;
+        Render::GL::CGLFramebuffer backgroundFramebuffer;
         if (backgroundFramebuffer.alloc(backgroundFbWidth, backgroundFbHeight)) {
             setFramebufferLinearFiltering(backgroundFramebuffer);
             renderedScaledBackgroundOnly =
                 renderBackgroundLayersIntoFramebuffer(backgroundFramebuffer, renderNow) &&
-                blitFramebufferRegion(backgroundFramebuffer, snapshot->framebuffer, makeRect(0.0, 0.0, backgroundFramebuffer.m_size.x, backgroundFramebuffer.m_size.y),
-                                     makeRect(0.0, 0.0, snapshot->framebuffer.m_size.x, snapshot->framebuffer.m_size.y));
+                blitFramebufferRegion(backgroundFramebuffer, *snapshot->framebuffer, makeRect(0.0, 0.0, backgroundFramebuffer.m_size.x, backgroundFramebuffer.m_size.y),
+                                     makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
         }
     }
 
     if (!renderedScaledBackgroundOnly) {
-        CRegion fakeDamage{0, 0, INT16_MAX, INT16_MAX};
-        g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &snapshot->framebuffer);
-        Render::GL::g_pHyprOpenGL->clear(CHyprColor{0.05, 0.06, 0.08, 1.0});
-        renderBackgroundLayers(renderNow);
-        if (renderWorkspaceContents && targetWorkspace && renderWorkspaceFn)
-            renderWorkspaceFn(g_pHyprRenderer.get(), monitor, targetWorkspace, renderNow, CBox{0.0, 0.0, static_cast<double>(fbWidth), static_cast<double>(fbHeight)});
-        Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = true;
-        g_pHyprRenderer->endRender();
-        Render::GL::g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockScreenShader;
+        // TODO(0.55): same beginRender SP<IFramebuffer> issue as above.
+        // Workspace-snapshot rendering disabled until ported. The strip will
+        // show empty tiles instead of live workspace previews.
+        (void)renderNow;
+        (void)previousBlockScreenShader;
     }
     if (renderWorkspaceContents) {
         applyFullscreenOverrideForState(m_stripPreviewContext.state, false);
@@ -9678,7 +9685,7 @@ void OverviewController::refreshWorkspaceStripSnapshots() {
         return;
     }
 
-    if (m_stripSnapshotRenderDepth > 0 || (Render::GL::g_pHyprOpenGL && Render::GL::g_pHyprOpenGL->m_renderData.pMonitor)) {
+    if (m_stripSnapshotRenderDepth > 0 || (Render::GL::g_pHyprOpenGL && render_shim::pMonitor())) {
         m_stripSnapshotsDirty = true;
         scheduleWorkspaceStripSnapshotRefresh();
         return;
@@ -9711,7 +9718,7 @@ void OverviewController::renderWorkspaceStrip() const {
     if (progress <= 0.0 || m_state.stripEntries.empty())
         return;
 
-    const auto renderMonitor = Render::GL::g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto renderMonitor = render_shim::pMonitor().lock();
     if (!renderMonitor)
         return;
 
@@ -9756,8 +9763,8 @@ void OverviewController::renderWorkspaceStrip() const {
 
         Render::GL::g_pHyprOpenGL->renderRect(toBox(thumbRender), cardColor, {.blur = true, .blurA = 1.0F});
 
-        if (!entry.newWorkspaceSlot && entry.snapshot && entry.snapshot->framebuffer.isAllocated() && entry.snapshot->framebuffer.getTexture()) {
-            Render::GL::g_pHyprOpenGL->renderTexture(entry.snapshot->framebuffer.getTexture(), toBox(thumbRender), {.a = static_cast<float>(std::clamp(progress, 0.0, 1.0))});
+        if (!entry.newWorkspaceSlot && entry.snapshot && entry.snapshot->framebuffer->isAllocated() && entry.snapshot->framebuffer->getTexture()) {
+            Render::GL::g_pHyprOpenGL->renderTexture(entry.snapshot->framebuffer->getTexture(), toBox(thumbRender), {.a = static_cast<float>(std::clamp(progress, 0.0, 1.0))});
         }
 
         if (stateOverlayColor.a > 0.0) {
@@ -9949,7 +9956,7 @@ void OverviewController::buildWorkspaceStripEntries(State& state) const {
 
         const bool useGoalGeometry = shouldUseGoalGeometryForStateSnapshot(window);
         const auto naturalGlobal = stateSnapshotGlobalRectForWindow(window, useGoalGeometry);
-        const auto previewAlpha = std::clamp(window->m_activeInactiveAlpha->value(), 0.0F, 1.0F);
+        const auto previewAlpha = std::clamp(1.0F /* TODO(0.55): m_activeInactiveAlpha removed; was per-window focus dimming */, 0.0F, 1.0F);
         const auto targetMonitor = preferredMonitorForWindow(window, state);
 
         for (auto& entry : state.stripEntries) {
@@ -10338,7 +10345,7 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
             .title = window->m_title,
             .naturalGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
             .exitGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
-            .previewAlpha = std::clamp(window->m_activeInactiveAlpha->value(), 0.0F, 1.0F),
+            .previewAlpha = std::clamp(1.0F /* TODO(0.55): m_activeInactiveAlpha removed; was per-window focus dimming */, 0.0F, 1.0F),
             .isFloating = window->m_isFloating,
             .isPinned = window->m_pinned,
             .isNiriFloatingOverlay = directNiriFloatingOverlay,
