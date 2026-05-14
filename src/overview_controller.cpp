@@ -4989,7 +4989,13 @@ bool OverviewController::installHooks() {
         std::ofstream f("/tmp/hymission-debug.log", std::ios::app);
         if (f) f << "[hymission-port] " << msg << "\n";
     };
-    logHookEvent("installHooks: enter");
+    logHookEvent("installHooks: enter (PORT STUB MODE: returning true without installing any hook)");
+    // TODO(0.55-port): hook installation segfaulted Hyprland on hot-load via
+    // hyprpm reload (twice). Until each hook's 0.55 symbol can be verified
+    // safely, install nothing. The plugin loads cleanly, dispatchers register,
+    // but the overview won't render anything (activateHooks early-returns
+    // because no hook is installed). This is "no crash" mode.
+    return true;
     const auto activateOptionalHook = [&](CFunctionHook*& hook, auto& original, const char* label) {
         if (!hook)
             return;
@@ -5010,7 +5016,7 @@ bool OverviewController::installHooks() {
         original = reinterpret_cast<OriginalT>(hook->m_original);
     };
 
-    if (hookFunction("handleGesture", "CConfigManager::handleGesture(", m_handleGestureHook, reinterpret_cast<void*>(&hkHandleGesture))) {
+    if (hookFunction("handleGesture", "Config::Legacy::CConfigManager::handleGesture(", m_handleGestureHook, reinterpret_cast<void*>(&hkHandleGesture))) {
         if (m_handleGestureHook->hook()) {
             m_handleGestureOriginal = reinterpret_cast<HandleGestureFn>(m_handleGestureHook->m_original);
         } else {
@@ -5032,37 +5038,37 @@ bool OverviewController::installHooks() {
 
     (void)hookFunction("renderLayer", "Render::IHyprRenderer::renderLayer(", m_renderLayerHook, reinterpret_cast<void*>(&hkRenderLayer));
 
-    if (!hookFunction("getTexBox", "CSurfacePassElement::getTexBox(", m_surfaceTexBoxHook, reinterpret_cast<void*>(&hkSurfaceTexBox))) {
+    if (!hookFunction("getTexBox", "Render::CSurfacePassElement::getTexBox(", m_surfaceTexBoxHook, reinterpret_cast<void*>(&hkSurfaceTexBox))) {
         notify("[hymission] failed to hook getTexBox", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("boundingBox", "CSurfacePassElement::boundingBox(", m_surfaceBoundingBoxHook, reinterpret_cast<void*>(&hkSurfaceBoundingBox))) {
+    if (!hookFunction("boundingBox", "Render::CSurfacePassElement::boundingBox(", m_surfaceBoundingBoxHook, reinterpret_cast<void*>(&hkSurfaceBoundingBox))) {
         notify("[hymission] failed to hook boundingBox", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("opaqueRegion", "CSurfacePassElement::opaqueRegion(", m_surfaceOpaqueRegionHook, reinterpret_cast<void*>(&hkSurfaceOpaqueRegion))) {
+    if (!hookFunction("opaqueRegion", "Render::CSurfacePassElement::opaqueRegion(", m_surfaceOpaqueRegionHook, reinterpret_cast<void*>(&hkSurfaceOpaqueRegion))) {
         notify("[hymission] failed to hook opaqueRegion", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("visibleRegion", "CSurfacePassElement::visibleRegion(", m_surfaceVisibleRegionHook, reinterpret_cast<void*>(&hkSurfaceVisibleRegion))) {
+    if (!hookFunction("visibleRegion", "Render::CSurfacePassElement::visibleRegion(", m_surfaceVisibleRegionHook, reinterpret_cast<void*>(&hkSurfaceVisibleRegion))) {
         notify("[hymission] failed to hook visibleRegion", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("draw", "CSurfacePassElement::draw(", m_surfaceDrawHook, reinterpret_cast<void*>(&hkSurfaceDraw))) {
+    if (!hookFunction("draw", "Render::CSurfacePassElement::draw(", m_surfaceDrawHook, reinterpret_cast<void*>(&hkSurfaceDraw))) {
         notify("[hymission] failed to hook surface draw", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("needsLiveBlur", "CSurfacePassElement::needsLiveBlur(", m_surfaceNeedsLiveBlurHook, reinterpret_cast<void*>(&hkSurfaceNeedsLiveBlur))) {
+    if (!hookFunction("needsLiveBlur", "Render::CSurfacePassElement::needsLiveBlur(", m_surfaceNeedsLiveBlurHook, reinterpret_cast<void*>(&hkSurfaceNeedsLiveBlur))) {
         notify("[hymission] failed to hook surface needsLiveBlur", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
     }
 
-    if (!hookFunction("needsPrecomputeBlur", "CSurfacePassElement::needsPrecomputeBlur(", m_surfaceNeedsPrecomputeBlurHook,
+    if (!hookFunction("needsPrecomputeBlur", "Render::CSurfacePassElement::needsPrecomputeBlur(", m_surfaceNeedsPrecomputeBlurHook,
                       reinterpret_cast<void*>(&hkSurfaceNeedsPrecomputeBlur))) {
         notify("[hymission] failed to hook surface needsPrecomputeBlur", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         /* port: hook failure tolerated */ ;
@@ -5282,6 +5288,10 @@ void OverviewController::deactivateHooks() {
 
 bool OverviewController::hookFunction(const std::string& symbolName, const std::string& demangledNeedle, CFunctionHook*& hook, void* destination) {
     void* source = findFunction(symbolName, demangledNeedle);
+    {
+        std::ofstream f("/tmp/hymission-debug.log", std::ios::app);
+        if (f) f << "[hymission-port] hookFunction symbol=" << symbolName << " needle=" << demangledNeedle << " source=" << (source ? "FOUND" : "NULL") << "\n";
+    }
     if (!source)
         return false;
 
