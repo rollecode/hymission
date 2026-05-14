@@ -718,6 +718,14 @@ class OverviewController {
     PHLWORKSPACEREF           m_pendingStripWorkspaceChangeTarget;
     PHLWINDOWREF              m_postCloseForcedFocus;
     bool                      m_postCloseForcedFocusLatched = false;
+    // Windows we stashed on a hidden special workspace because the user
+    // picked a same-workspace non-fullscreen target. Restored to the saved
+    // workspace ID when re-selected in a future overview cycle.
+    struct StashedWindow {
+        PHLWINDOWREF window;
+        int          originalWorkspaceId = -1;
+    };
+    std::vector<StashedWindow> m_persistentFullscreenRestore;
     std::size_t               m_ignorePostCloseMouseMoveCount = 0;
     PostCloseDispatcher       m_postCloseDispatcher = PostCloseDispatcher::None;
     std::string               m_postCloseDispatcherArgs;
