@@ -5557,7 +5557,14 @@ std::string OverviewController::collectionSummary(const PHLMONITOR& monitor) con
             }
         }
 
-        if (window->m_pinned) {
+        // Windows we stashed on special:hymission-stash (because the user
+        // picked a same-workspace non-fullscreen target) must appear in
+        // overview so the user can pick the stashed game back.
+        const bool isStashedByUs =
+            std::ranges::any_of(m_persistentFullscreenRestore, [&](const StashedWindow& entry) { return !entry.window.expired() && entry.window.lock() == window; });
+        if (isStashedByUs) {
+            // pass through; treat as accepted regardless of workspace
+        } else if (window->m_pinned) {
             const bool visibleOnAnyMonitor =
                 std::ranges::any_of(participatingMonitors, [&](const PHLMONITOR& candidate) { return candidate && window->visibleOnMonitor(candidate); });
             if (window->onSpecialWorkspace() || !visibleOnAnyMonitor) {
@@ -6792,7 +6799,18 @@ bool OverviewController::clearWorkspaceFullscreenForExitTarget(const PHLWINDOW& 
         debugLog(out.str());
     }
 
-    g_pCompositor->setWindowFullscreenInternal(fullscreenWindow, FSMODE_NONE);
+    // Don't un-fullscreen the source - games (especially XWayland ones like
+    // Overwatch) immediately re-request fullscreen and any forced size mismatch
+    // corrupts their input coordinate space. Instead, stash the window on a
+    // hidden special workspace so it stays in its proper fullscreen state.
+    // The exit target then becomes visible naturally on its own workspace.
+    const int originalWorkspaceId = fullscreenWindow->m_workspace ? fullscreenWindow->m_workspace->m_id : -1;
+    std::erase_if(m_persistentFullscreenRestore, [&](const auto& entry) {
+        return entry.window.expired() || entry.window.lock() == fullscreenWindow;
+    });
+    m_persistentFullscreenRestore.push_back({fullscreenWindow, originalWorkspaceId});
+    const auto address = std::format("address:0x{:x}", reinterpret_cast<uintptr_t>(fullscreenWindow.get()));
+    g_pKeybindManager->m_dispatchers["movetoworkspacesilent"](std::format("special:hymission-stash,{}", address));
 
     if (backupIt->workspace) {
         backupIt->workspace->m_hasFullscreenWindow = false;
@@ -8231,6 +8249,52 @@ void OverviewController::deactivate() {
             g_pCompositor->setWindowFullscreenInternal(desiredFocus, FSMODE_NONE);
         g_pCompositor->setWindowFullscreenInternal(desiredFocus, originalFullscreenMode);
     }
+    // Persistent un-stash: if a previous overview cycle stashed this window
+    // on special:hymission-stash to hide a same-workspace fullscreen source,
+    // move it back to its original workspace now.
+    std::erase_if(m_persistentFullscreenRestore, [](const auto& entry) { return entry.window.expired(); });
+    if (desiredFocus && desiredFocus->m_isMapped) {
+        const auto it = std::find_if(m_persistentFullscreenRestore.begin(), m_persistentFullscreenRestore.end(),
+                                     [&](const auto& entry) { return entry.window.lock() == desiredFocus; });
+        if (it != m_persistentFullscreenRestore.end() && it->originalWorkspaceId >= 0) {
+            const auto originalWorkspaceId = it->originalWorkspaceId;
+            m_persistentFullscreenRestore.erase(it);
+            const auto address = std::format("address:0x{:x}", reinterpret_cast<uintptr_t>(desiredFocus.get()));
+            g_pKeybindManager->m_dispatchers["movetoworkspacesilent"](std::format("{},{}", originalWorkspaceId, address));
+        }
+    }
+    // Raise the chosen exit target to the top of the floating z-stack.
+    // Without this, focus alone leaves a non-fullscreen target behind
+    // whatever window was previously on top (e.g. an un-fullscreened game).
+    if (desiredFocus && desiredFocus->m_isMapped && g_pCompositor) {
+        g_pCompositor->changeWindowZOrder(desiredFocus, true);
+        std::ofstream zfix("/tmp/hymission-zfix.log", std::ios::app);
+        if (!zfix.is_open()) {
+            // skip
+        } else {
+            zfix << "deactivate raised=" << debugWindowLabel(desiredFocus) << " fs=" << static_cast<int>(desiredFocus->m_fullscreenState.internal)
+                 << " float=" << desiredFocus->m_isFloating << " mapped=" << desiredFocus->m_isMapped
+                 << " persistRestoreCount=" << m_persistentFullscreenRestore.size() << '\n';
+            const auto activeWin = Desktop::focusState()->window();
+            zfix << "  focusState.window=" << (activeWin ? debugWindowLabel(activeWin) : "null") << '\n';
+            // Enumerate windows on the desiredFocus workspace
+            const auto targetWs = desiredFocus->m_workspace;
+            zfix << "  workspace=" << (targetWs ? targetWs->m_name : "null") << " hasFs=" << (targetWs && targetWs->m_hasFullscreenWindow)
+                 << " fsMode=" << (targetWs ? static_cast<int>(targetWs->m_fullscreenMode) : -1) << '\n';
+            for (const auto& w : g_pCompositor->m_windows) {
+                if (!w || !w->m_isMapped || w->m_workspace != targetWs)
+                    continue;
+                zfix << "    win=" << debugWindowLabel(w) << " fs=" << static_cast<int>(w->m_fullscreenState.internal)
+                     << " float=" << w->m_isFloating << " createdOverFs=" << w->m_createdOverFullscreen
+                     << " pos=(" << w->m_realPosition->value().x << "," << w->m_realPosition->value().y << ")"
+                     << " size=(" << w->m_realSize->value().x << "," << w->m_realSize->value().y << ")\n";
+            }
+        }
+    } else if (g_pCompositor) {
+        std::ofstream zfix("/tmp/hymission-zfix.log", std::ios::app);
+        if (zfix.is_open())
+            zfix << "deactivate no-desiredFocus or unmapped (desiredFocus=" << (desiredFocus ? "set" : "null") << ")\n";
+    }
     if (debugLogsEnabled()) {
         std::ostringstream out;
         out << "[hymission] deactivate result active=";
@@ -8272,6 +8336,20 @@ void OverviewController::deactivate() {
         g_pHyprRenderer->damageMonitor(monitor);
         g_pCompositor->scheduleFrameForMonitor(monitor);
     }
+
+    // Refresh pointer focus after geometry/fullscreen restoration. For a
+    // fullscreen-restored target the cursor might still be at the overview
+    // tile-click position; without warping it onto the game's surface, the
+    // game won't receive wl_pointer.enter and its pointer-grab / mouselook
+    // never re-arms (keyboard works but clicks don't register). Warp first,
+    // then trigger the motion that propagates pointer focus, synchronously
+    // so the order is deterministic before postCloseDispatcher runs.
+    if (desiredFocus && desiredFocus->m_isMapped && g_pCompositor) {
+        if (desiredFocus->m_fullscreenState.internal != FSMODE_NONE)
+            desiredFocus->warpCursor();
+    }
+    if (g_pInputManager)
+        g_pInputManager->simulateMouseMovement();
 
     switch (postCloseDispatcher) {
         case PostCloseDispatcher::Fullscreen:
