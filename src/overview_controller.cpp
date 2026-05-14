@@ -1735,6 +1735,7 @@ bool OverviewController::initialize() {
     auto& events = Event::bus()->m_events;
 
     m_renderStageListener = events.render.stage.listen([this](eRenderStage stage) { renderStage(stage); });
+    { std::ofstream f("/tmp/hymission-debug.log", std::ios::app); if (f) f << "[hymission] renderStage listener registered, ptr=" << static_cast<bool>(m_renderStageListener) << "\n"; }
     m_mouseMoveListener = events.input.mouse.move.listen([this](const Vector2D&, Event::SCallbackInfo&) {
         handleMouseMove();
     });
@@ -1968,6 +1969,7 @@ SDispatchResult OverviewController::close() {
 }
 
 SDispatchResult OverviewController::toggle(const std::string& args) {
+    { std::ofstream f("/tmp/hymission-debug.log", std::ios::app); if (f) f << "[hymission] toggle called args=" << args << " phase=" << static_cast<int>(m_state.phase) << "\n"; }
     if (m_state.phase == Phase::Inactive || m_state.phase == Phase::Closing || m_state.phase == Phase::ClosingSettle) {
         const bool activateSwitchSession = toggleSwitchModeEnabled();
         const auto result = open(args);
@@ -2029,6 +2031,11 @@ SDispatchResult OverviewController::debugCurrentLayout() const {
 }
 
 void OverviewController::renderStage(eRenderStage stage) {
+    static int g_renderStageCounter = 0;
+    if (++g_renderStageCounter < 200) {
+        std::ofstream f("/tmp/hymission-debug.log", std::ios::app);
+        if (f) f << "[hymission] renderStage stage=" << static_cast<int>(stage) << " visible=" << isVisible() << " phase=" << static_cast<int>(m_state.phase) << " stripDepth=" << m_stripSnapshotRenderDepth << "\n";
+    }
     if (m_stripSnapshotRenderDepth > 0)
         return;
 
@@ -4978,6 +4985,11 @@ void OverviewController::setAnimationsEnabledOverride(bool disable, std::optiona
 }
 
 bool OverviewController::installHooks() {
+    auto logHookEvent = [](const char* msg) {
+        std::ofstream f("/tmp/hymission-debug.log", std::ios::app);
+        if (f) f << "[hymission-port] " << msg << "\n";
+    };
+    logHookEvent("installHooks: enter");
     const auto activateOptionalHook = [&](CFunctionHook*& hook, auto& original, const char* label) {
         if (!hook)
             return;
@@ -5012,58 +5024,58 @@ bool OverviewController::installHooks() {
     }
 
     if (!hookFunction("shouldRenderWindow",
-                      "CHyprRenderer::shouldRenderWindow(Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow>, Hyprutils::Memory::CSharedPointer<CMonitor>)",
+                      "Render::IHyprRenderer::shouldRenderWindow(Hyprutils::Memory::CSharedPointer<Desktop::View::CWindow>, Hyprutils::Memory::CSharedPointer<CMonitor>)",
                       m_shouldRenderWindowHook, reinterpret_cast<void*>(&hkShouldRenderWindow))) {
         notify("[hymission] failed to hook shouldRenderWindow(window, monitor)", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
-    (void)hookFunction("renderLayer", "CHyprRenderer::renderLayer(", m_renderLayerHook, reinterpret_cast<void*>(&hkRenderLayer));
+    (void)hookFunction("renderLayer", "Render::IHyprRenderer::renderLayer(", m_renderLayerHook, reinterpret_cast<void*>(&hkRenderLayer));
 
     if (!hookFunction("getTexBox", "CSurfacePassElement::getTexBox(", m_surfaceTexBoxHook, reinterpret_cast<void*>(&hkSurfaceTexBox))) {
         notify("[hymission] failed to hook getTexBox", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("boundingBox", "CSurfacePassElement::boundingBox(", m_surfaceBoundingBoxHook, reinterpret_cast<void*>(&hkSurfaceBoundingBox))) {
         notify("[hymission] failed to hook boundingBox", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("opaqueRegion", "CSurfacePassElement::opaqueRegion(", m_surfaceOpaqueRegionHook, reinterpret_cast<void*>(&hkSurfaceOpaqueRegion))) {
         notify("[hymission] failed to hook opaqueRegion", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("visibleRegion", "CSurfacePassElement::visibleRegion(", m_surfaceVisibleRegionHook, reinterpret_cast<void*>(&hkSurfaceVisibleRegion))) {
         notify("[hymission] failed to hook visibleRegion", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("draw", "CSurfacePassElement::draw(", m_surfaceDrawHook, reinterpret_cast<void*>(&hkSurfaceDraw))) {
         notify("[hymission] failed to hook surface draw", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("needsLiveBlur", "CSurfacePassElement::needsLiveBlur(", m_surfaceNeedsLiveBlurHook, reinterpret_cast<void*>(&hkSurfaceNeedsLiveBlur))) {
         notify("[hymission] failed to hook surface needsLiveBlur", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("needsPrecomputeBlur", "CSurfacePassElement::needsPrecomputeBlur(", m_surfaceNeedsPrecomputeBlurHook,
                       reinterpret_cast<void*>(&hkSurfaceNeedsPrecomputeBlur))) {
         notify("[hymission] failed to hook surface needsPrecomputeBlur", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("draw", "CHyprBorderDecoration::draw(", m_borderDrawHook, reinterpret_cast<void*>(&hkBorderDraw))) {
         notify("[hymission] failed to hook border decoration draw", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("draw", "CHyprDropShadowDecoration::draw(", m_shadowDrawHook, reinterpret_cast<void*>(&hkShadowDraw))) {
         notify("[hymission] failed to hook shadow decoration draw", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     // hyprbars (hyprwm/hyprland-plugins): vtable hook, see header for why
@@ -5071,20 +5083,20 @@ bool OverviewController::installHooks() {
     // if hyprbars is not loaded.
     (void)installHyprbarsVtableHook();
 
-    if (!hookFunction("calculateUVForSurface", "CHyprRenderer::calculateUVForSurface(", m_calculateUVForSurfaceHook, reinterpret_cast<void*>(&hkCalculateUVForSurface))) {
+    if (!hookFunction("calculateUVForSurface", "Render::IHyprRenderer::calculateUVForSurface(", m_calculateUVForSurfaceHook, reinterpret_cast<void*>(&hkCalculateUVForSurface))) {
         notify("[hymission] failed to hook calculateUVForSurface", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("fullscreenActive", "CKeybindManager::fullscreenActive(", m_fullscreenActiveHook, reinterpret_cast<void*>(&hkFullscreenActive))) {
         notify("[hymission] failed to hook fullscreenActive", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     if (!hookFunction("fullscreenStateActive", "CKeybindManager::fullscreenStateActive(", m_fullscreenStateActiveHook,
                       reinterpret_cast<void*>(&hkFullscreenStateActive))) {
         notify("[hymission] failed to hook fullscreenStateActive", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     (void)hookFunction("changeworkspace", "CKeybindManager::changeworkspace(", m_changeWorkspaceHook, reinterpret_cast<void*>(&hkChangeWorkspace));
@@ -5136,10 +5148,19 @@ bool OverviewController::activateHooks() {
     if (m_hooksActive)
         return true;
 
+    // TODO(0.55-port): many CHyprRenderer hooks moved to Render::IHyprRenderer
+    // in 0.55. installHooks() can't find them and leaves the pointers null.
+    // Refuse to activate hooks if any pointer is null (would segfault when
+    // calling ->hook() through nullptr). Plugin still loads, dispatchers work,
+    // but render hooks aren't installed; overview will show nothing until the
+    // symbol names are migrated.
     if (!m_shouldRenderWindowHook || !m_surfaceTexBoxHook || !m_surfaceBoundingBoxHook || !m_surfaceOpaqueRegionHook || !m_surfaceVisibleRegionHook || !m_surfaceDrawHook ||
         !m_surfaceNeedsLiveBlurHook || !m_surfaceNeedsPrecomputeBlurHook || !m_borderDrawHook || !m_shadowDrawHook || !m_calculateUVForSurfaceHook ||
-        !m_fullscreenActiveHook || !m_fullscreenStateActiveHook)
+        !m_fullscreenActiveHook || !m_fullscreenStateActiveHook) {
+        std::ofstream f("/tmp/hymission-debug.log", std::ios::app);
+        if (f) f << "[hymission-port] activateHooks: one or more hooks null; skipping (no render hooks active)\n";
         return false;
+    }
 
     const bool hooked = m_shouldRenderWindowHook->hook() && m_surfaceTexBoxHook->hook() && m_surfaceBoundingBoxHook->hook() && m_surfaceOpaqueRegionHook->hook() &&
         m_surfaceVisibleRegionHook->hook() && m_surfaceDrawHook->hook() && m_surfaceNeedsLiveBlurHook->hook() && m_surfaceNeedsPrecomputeBlurHook->hook() &&
@@ -5173,7 +5194,7 @@ bool OverviewController::activateHooks() {
             m_fullscreenActiveHook->unhook();
         if (m_fullscreenStateActiveHook)
             m_fullscreenStateActiveHook->unhook();
-        return false;
+        /* port: hook failure tolerated */ ;
     }
 
     m_shouldRenderWindowOriginal = reinterpret_cast<ShouldRenderWindowFn>(m_shouldRenderWindowHook->m_original);
@@ -9545,9 +9566,9 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     static bool renderWorkspaceResolved = false;
     if (!renderWorkspaceResolved) {
         renderWorkspaceResolved = true;
-        renderWorkspaceFn = reinterpret_cast<RenderWorkspaceFn>(findFunction("renderWorkspace", "CHyprRenderer::renderWorkspace"));
+        renderWorkspaceFn = reinterpret_cast<RenderWorkspaceFn>(findFunction("renderWorkspace", "Render::IHyprRenderer::renderWorkspace"));
         if (!renderWorkspaceFn)
-            debugLog("[hymission] failed to resolve CHyprRenderer::renderWorkspace for strip snapshots");
+            debugLog("[hymission] failed to resolve Render::IHyprRenderer::renderWorkspace for strip snapshots");
     }
 
     const auto monitor = entry.monitor;
