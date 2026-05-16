@@ -4,15 +4,22 @@
 #include <any>
 #include <cmath>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <dlfcn.h>
 #include <expected>
 #include <fstream>
 #include <limits>
+#include <link.h>
 #include <linux/input-event-codes.h>
 #include <numeric>
 #include <optional>
 #include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1695,6 +1702,13 @@ void hkShadowDraw(void* shadowDecorationThisptr, PHLMONITOR monitor, const float
     g_controller->shadowDrawHook(shadowDecorationThisptr, monitor, alpha);
 }
 
+void hkHyprbarsDraw(void* hyprbarsThisptr, PHLMONITOR monitor, const float& alpha) {
+    if (!g_controller)
+        return;
+
+    g_controller->hyprbarsDrawHook(hyprbarsThisptr, monitor, alpha);
+}
+
 void hkCalculateUVForSurface(void* rendererThisptr, PHLWINDOW window, SP<CWLSurfaceResource> surface, PHLMONITOR monitor, bool main, const Vector2D& projSize,
                              const Vector2D& projSizeUnscaled, bool fixMisalignedFSV1) {
     if (!g_controller)
@@ -2808,6 +2822,115 @@ void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHL
         m_shadowDrawOriginal(shadowDecorationThisptr, monitor, alpha);
         return;
     }
+}
+
+void OverviewController::hyprbarsDrawHook(void* hyprbarsThisptr, const PHLMONITOR& monitor, const float& alpha) {
+    if (!m_hyprbarsDrawOriginal) {
+        return;
+    }
+
+    const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
+    if (!window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window) || previewMonitorForWindow(window) != monitor) {
+        m_hyprbarsDrawOriginal(hyprbarsThisptr, monitor, alpha);
+        return;
+    }
+    // Window is being rendered as an overview tile: suppress the bar draw.
+}
+
+void* OverviewController::dlsymInHyprbars(const char* mangledSymbol) const {
+    struct Search {
+        const char* symbol = nullptr;
+        void*       address = nullptr;
+    } search;
+    search.symbol = mangledSymbol;
+
+    dl_iterate_phdr(
+        [](struct dl_phdr_info* info, std::size_t /*size*/, void* data) -> int {
+            auto* result = static_cast<Search*>(data);
+            if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0')
+                return 0;
+
+            const std::string_view path{info->dlpi_name};
+            if (path.find("hyprbar") == std::string_view::npos)
+                return 0;
+
+            void* handle = dlopen(info->dlpi_name, RTLD_LAZY | RTLD_NOLOAD);
+            if (!handle)
+                return 0;
+
+            void* symbol = dlsym(handle, result->symbol);
+            dlclose(handle);
+
+            if (!symbol)
+                return 0;
+
+            result->address = symbol;
+            return 1; // stop iteration
+        },
+        &search);
+
+    return search.address;
+}
+
+bool OverviewController::installHyprbarsVtableHook() {
+    // CHyprBar::draw(Hyprutils::Memory::CSharedPointer<CMonitor>, float const&)
+    static constexpr const char* DRAW_SYMBOL   = "_ZN8CHyprBar4drawEN9Hyprutils6Memory14CSharedPointerI8CMonitorEERKf";
+    // vtable for CHyprBar
+    static constexpr const char* VTABLE_SYMBOL = "_ZTV8CHyprBar";
+
+    void* drawAddr = dlsymInHyprbars(DRAW_SYMBOL);
+    if (!drawAddr)
+        return false;
+
+    void* vtableSymbolAddr = dlsymInHyprbars(VTABLE_SYMBOL);
+    if (!vtableSymbolAddr)
+        return false;
+
+    // Itanium ABI vtable: [ offset_to_top, typeinfo, fn0, fn1, ... ]. Scan
+    // for the slot equal to the dlsym'd draw address. Cap at 32 slots —
+    // IHyprWindowDecoration has fewer than 16 virtuals.
+    void** slots = static_cast<void**>(vtableSymbolAddr);
+    for (std::size_t i = 0; i < 32; ++i) {
+        if (slots[i] == drawAddr) {
+            m_hyprbarsVtableSlot = &slots[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+void OverviewController::activateHyprbarsVtableHook() {
+    if (!m_hyprbarsVtableSlot || m_hyprbarsVtableSwapped)
+        return;
+
+    const auto pageSize  = sysconf(_SC_PAGE_SIZE);
+    auto*      slotByte  = reinterpret_cast<std::uint8_t*>(m_hyprbarsVtableSlot);
+    auto*      pageStart = slotByte - (reinterpret_cast<std::uintptr_t>(slotByte) % pageSize);
+    if (mprotect(pageStart, pageSize, PROT_READ | PROT_WRITE) != 0)
+        return;
+
+    m_hyprbarsDrawOriginal = reinterpret_cast<BorderDrawFn>(*m_hyprbarsVtableSlot);
+    *m_hyprbarsVtableSlot  = reinterpret_cast<void*>(&hkHyprbarsDraw);
+
+    mprotect(pageStart, pageSize, PROT_READ);
+    m_hyprbarsVtableSwapped = true;
+}
+
+void OverviewController::deactivateHyprbarsVtableHook() {
+    if (!m_hyprbarsVtableSlot || !m_hyprbarsVtableSwapped)
+        return;
+
+    const auto pageSize  = sysconf(_SC_PAGE_SIZE);
+    auto*      slotByte  = reinterpret_cast<std::uint8_t*>(m_hyprbarsVtableSlot);
+    auto*      pageStart = slotByte - (reinterpret_cast<std::uintptr_t>(slotByte) % pageSize);
+    if (mprotect(pageStart, pageSize, PROT_READ | PROT_WRITE) != 0)
+        return;
+
+    *m_hyprbarsVtableSlot  = reinterpret_cast<void*>(m_hyprbarsDrawOriginal);
+    mprotect(pageStart, pageSize, PROT_READ);
+
+    m_hyprbarsDrawOriginal  = nullptr;
+    m_hyprbarsVtableSwapped = false;
 }
 
 void OverviewController::calculateUVForSurfaceHook(const PHLWINDOW& window, SP<CWLSurfaceResource> surface, const PHLMONITOR& monitor, bool main, const Vector2D& projSize,
@@ -5568,6 +5691,10 @@ bool OverviewController::installHooks() {
         return false;
     }
 
+    // hyprbars (hyprwm/hyprland-plugins): vtable swap, not CFunctionHook
+    // (see header). Optional, silently no-ops if hyprbars is not loaded.
+    (void)installHyprbarsVtableHook();
+
     if (!hookFunction("calculateUVForSurface",
                       std::vector<std::string>{"IElementRenderer::calculateUVForSurface(", "CHyprRenderer::calculateUVForSurface("},
                       m_calculateUVForSurfaceHook, reinterpret_cast<void*>(&hkCalculateUVForSurface))) {
@@ -5616,6 +5743,7 @@ bool OverviewController::installHooks() {
     m_surfaceNeedsPrecomputeBlurOriginal = nullptr;
     m_borderDrawOriginal = nullptr;
     m_shadowDrawOriginal = nullptr;
+    m_hyprbarsDrawOriginal = nullptr;
     m_calculateUVForSurfaceOriginal = nullptr;
     m_renderLayerOriginal = nullptr;
     if (!m_changeWorkspaceDispatcherWrapped)
@@ -5692,6 +5820,7 @@ bool OverviewController::activateHooks() {
     m_surfaceNeedsPrecomputeBlurOriginal = reinterpret_cast<SurfaceBlurNeedsFn>(m_surfaceNeedsPrecomputeBlurHook->m_original);
     m_borderDrawOriginal = reinterpret_cast<BorderDrawFn>(m_borderDrawHook->m_original);
     m_shadowDrawOriginal = reinterpret_cast<BorderDrawFn>(m_shadowDrawHook->m_original);
+    activateHyprbarsVtableHook(); // no-op if installHyprbarsVtableHook() found no slot
     m_calculateUVForSurfaceOriginal = reinterpret_cast<CalculateUVForSurfaceFn>(m_calculateUVForSurfaceHook->m_original);
     if (m_renderLayerHook) {
         if (m_renderLayerHook->hook()) {
@@ -5734,6 +5863,7 @@ void OverviewController::deactivateHooks() {
         m_borderDrawHook->unhook();
     if (m_shadowDrawHook)
         m_shadowDrawHook->unhook();
+    deactivateHyprbarsVtableHook();
     if (m_calculateUVForSurfaceHook)
         m_calculateUVForSurfaceHook->unhook();
     m_shouldRenderWindowOriginal = nullptr;
@@ -5746,6 +5876,7 @@ void OverviewController::deactivateHooks() {
     m_surfaceNeedsPrecomputeBlurOriginal = nullptr;
     m_borderDrawOriginal = nullptr;
     m_shadowDrawOriginal = nullptr;
+    m_hyprbarsDrawOriginal = nullptr;
     m_calculateUVForSurfaceOriginal = nullptr;
     m_renderLayerOriginal = nullptr;
     m_surfaceRenderDataTransformDepth = 0;

@@ -87,6 +87,10 @@ class OverviewController {
     bool                shouldRenderWindowHook(const PHLWINDOW& window, const PHLMONITOR& monitor);
     void                borderDrawHook(void* borderDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                shadowDrawHook(void* shadowDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
+    // hyprwm/hyprland-plugins hyprbars per-window title bar. Optional —
+    // only installed if hyprbars is loaded. Suppresses the bar draw for
+    // windows hymission is rendering as overview tiles.
+    void                hyprbarsDrawHook(void* hyprbarsThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                calculateUVForSurfaceHook(const PHLWINDOW& window, SP<CWLSurfaceResource> surface, const PHLMONITOR& monitor, bool main, const Vector2D& projSize,
                                                   const Vector2D& projSizeUnscaled, bool fixMisalignedFSV1);
     void                renderLayerHook(void* rendererThisptr, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& now, bool popups, bool lockscreen);
@@ -474,6 +478,14 @@ class OverviewController {
     [[nodiscard]] bool         hookFunction(const std::string& symbolName, const std::vector<std::string>& demangledNeedles, CFunctionHook*& hook, void* destination);
     [[nodiscard]] void*        findFunction(const std::string& symbolName, const std::string& demangledNeedle) const;
     [[nodiscard]] void*        findFunction(const std::string& symbolName, const std::vector<std::string>& demangledNeedles) const;
+    // hyprbars lives in its own .so >2GB from the Hyprland binary, so
+    // CFunctionHook's 32-bit relative jump can't reach CHyprBar::draw. We
+    // patch CHyprBar's vtable draw slot directly instead. Optional — silently
+    // no-ops if hyprbars is not loaded.
+    [[nodiscard]] bool         installHyprbarsVtableHook();
+    void                       activateHyprbarsVtableHook();
+    void                       deactivateHyprbarsVtableHook();
+    [[nodiscard]] void*        dlsymInHyprbars(const char* mangledSymbol) const;
     [[nodiscard]] bool         wrapDispatcher(const std::string& name, DispatcherHandler& original, DispatcherHandler replacement);
     void                       restoreWrappedDispatchers();
 
@@ -652,6 +664,8 @@ class OverviewController {
     CFunctionHook*            m_renderLayerHook = nullptr;
     CFunctionHook*            m_borderDrawHook = nullptr;
     CFunctionHook*            m_shadowDrawHook = nullptr;
+    void**                    m_hyprbarsVtableSlot = nullptr; // draw slot inside CHyprBar's vtable
+    bool                      m_hyprbarsVtableSwapped = false;
     CFunctionHook*            m_calculateUVForSurfaceHook = nullptr;
     CFunctionHook*            m_workspaceSwipeBeginFunctionHook = nullptr;
     CFunctionHook*            m_workspaceSwipeUpdateFunctionHook = nullptr;
@@ -674,6 +688,7 @@ class OverviewController {
     RenderLayerFn             m_renderLayerOriginal = nullptr;
     BorderDrawFn              m_borderDrawOriginal = nullptr;
     BorderDrawFn              m_shadowDrawOriginal = nullptr;
+    BorderDrawFn              m_hyprbarsDrawOriginal = nullptr;
     CalculateUVForSurfaceFn   m_calculateUVForSurfaceOriginal = nullptr;
     DispatcherHandler         m_fullscreenActiveOriginal;
     DispatcherHandler         m_fullscreenStateActiveOriginal;
