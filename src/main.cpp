@@ -257,7 +257,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 #define FLOAT_CONF(name, value) addFloatConfig("plugin:hymission:" name, Config::FLOAT{value})
 #define STRING_CONF(name, value) addStringConfig("plugin:hymission:" name, Config::STRING{value})
     INT_CONF("outer_padding", 32);
-    INT_CONF("outer_padding_top", 92);
+    INT_CONF("outer_padding_top", 32);
     INT_CONF("outer_padding_right", 32);
     INT_CONF("outer_padding_bottom", 32);
     INT_CONF("outer_padding_left", 32);
@@ -283,7 +283,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     INT_CONF("only_active_workspace", 0);
     INT_CONF("only_active_monitor", 0);
     INT_CONF("show_special", 0);
-    INT_CONF("toggle_switch_mode", 1);
+    INT_CONF("toggle_switch_mode", 0);
     INT_CONF("switch_toggle_auto_next", 1);
     INT_CONF("workspace_change_keeps_overview", 1);
     INT_CONF("workspace_strip_thickness", 160);

@@ -140,7 +140,7 @@ constexpr double RECOMMAND_STAGE_TRANSFER = 0.18;
 constexpr double SELECTED_WINDOW_LAYOUT_EMPHASIS = 1.18;
 constexpr double HOVER_SELECTION_RETARGET_DISTANCE = 18.0;
 constexpr auto   HOVER_SELECTION_RETARGET_COOLDOWN = std::chrono::milliseconds(static_cast<int>(RELAYOUT_DURATION_MS + 48.0));
-constexpr auto   HOVER_SELECTION_RETARGET_DWELL = std::chrono::milliseconds(48);
+constexpr auto   HOVER_SELECTION_RETARGET_DWELL = std::chrono::milliseconds(150);
 constexpr auto   TOGGLE_SWITCH_RELEASE_POLL_INTERVAL = std::chrono::milliseconds(16);
 constexpr auto   MISSION_CONTROL_WORKSPACE_NAME = "Mission Control";
 constexpr auto   MISSION_CONTROL_HIDDEN_WORKSPACE_PREFIX = "__hymission_hidden__:";
@@ -3348,7 +3348,7 @@ bool OverviewController::multiWorkspaceSortRecentFirstEnabled() const {
 }
 
 bool OverviewController::toggleSwitchModeEnabled() const {
-    return getConfigInt(m_handle, "plugin:hymission:toggle_switch_mode", 1) != 0;
+    return getConfigInt(m_handle, "plugin:hymission:toggle_switch_mode", 0) != 0;
 }
 
 bool OverviewController::switchToggleAutoNextEnabled() const {
