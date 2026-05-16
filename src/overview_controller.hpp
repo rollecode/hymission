@@ -466,6 +466,10 @@ class OverviewController {
     void                       setInputFollowMouseOverride(bool disable);
     void                       setScrollingFollowFocusOverride(bool disable);
     void                       setAnimationsEnabledOverride(bool disable, std::optional<std::chrono::milliseconds> restoreDelay = std::nullopt);
+    // Force debug:damage_tracking=0 during overview; restore on close.
+    // Without it, scaled tiles flicker badly on hover (NVIDIA). Upstream
+    // gfhdhytghd/hymission#2, never merged.
+    void                       setDamageTrackingOverride(bool disable);
     void                       applyWorkspaceNameOverrides(const State& state);
     void                       restoreWorkspaceNameOverrides();
     void                       clearRegisteredTrackpadGestures();
@@ -651,6 +655,8 @@ class OverviewController {
     State  buildState(const PHLMONITOR& monitor, ScopeOverride requestedScope, const std::vector<WorkspaceOverride>& workspaceOverrides = {},
                       bool keepEmptyParticipatingMonitors = false, bool suppressWorkspaceStrip = false, PHLWINDOW preferredSelectedWindow = {}) const;
     State  m_state;
+    bool   m_damageTrackingOverridden = false;
+    long   m_damageTrackingBackup     = 2; // Hyprland default
     HANDLE m_handle = nullptr;
 
     CFunctionHook*            m_surfaceTexBoxHook = nullptr;

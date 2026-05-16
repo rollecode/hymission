@@ -1843,6 +1843,7 @@ OverviewController::~OverviewController() {
     setInputFollowMouseOverride(false);
     setScrollingFollowFocusOverride(false);
     setAnimationsEnabledOverride(false);
+    setDamageTrackingOverride(false);
     restoreWrappedDispatchers();
     deactivateHooks();
     if (m_workspaceSwipeBeginFunctionHook)
@@ -5538,6 +5539,46 @@ void OverviewController::setScrollingFollowFocusOverride(bool disable) {
     m_scrollingFollowFocusOverridden = false;
 }
 
+void OverviewController::setDamageTrackingOverride(bool disable) {
+    // Force `debug:damage_tracking = 0` while overview is active. Hyprland's
+    // damage tracking culls the scaled-down window previews when the cursor
+    // only damages a tiny region, producing colourful noise / heavy flicker
+    // on hover (very visible on NVIDIA). Restore the user's prior value on
+    // close. Documented upstream in gfhdhytghd/hymission#2 (never merged).
+    if (disable) {
+        if (m_damageTrackingOverridden)
+            return;
+
+        m_damageTrackingBackup = getConfigInt(m_handle, "debug:damage_tracking", 2);
+        if (m_damageTrackingBackup == 0)
+            return; // user already has it off, no-op
+
+        const auto err = setConfigKeyword("debug:damage_tracking", "0");
+        if (!err.empty()) {
+            notify("[hymission] failed to disable debug:damage_tracking", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
+            return;
+        }
+
+        m_damageTrackingOverridden = true;
+        if (debugLogsEnabled())
+            debugLog("[hymission] disabled debug:damage_tracking");
+        return;
+    }
+
+    if (!m_damageTrackingOverridden)
+        return;
+
+    const auto err = setConfigKeyword("debug:damage_tracking", std::to_string(m_damageTrackingBackup));
+    if (!err.empty()) {
+        notify("[hymission] failed to restore debug:damage_tracking", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
+        return;
+    }
+
+    m_damageTrackingOverridden = false;
+    if (debugLogsEnabled())
+        debugLog("[hymission] restored debug:damage_tracking");
+}
+
 void OverviewController::setAnimationsEnabledOverride(bool disable, std::optional<std::chrono::milliseconds> restoreDelay) {
     if (disable) {
         if (!m_animationsEnabledOverridden) {
@@ -8369,6 +8410,7 @@ CRegion OverviewController::transformRegionForWindow(const PHLWINDOW& window, co
 
 void OverviewController::beginOpen(const PHLMONITOR& monitor, ScopeOverride requestedScope) {
     setAnimationsEnabledOverride(false);
+    setDamageTrackingOverride(true);
     clearToggleSwitchSession();
 
     const auto buildStart = std::chrono::steady_clock::now();
@@ -8678,6 +8720,7 @@ void OverviewController::beginClose(CloseMode mode, std::optional<double> fromVi
 }
 
 void OverviewController::deactivate() {
+    setDamageTrackingOverride(false);
     const auto monitor = m_state.ownerMonitor;
     const auto ownedMonitors = m_state.participatingMonitors;
     const auto fullscreenActiveOriginal = m_fullscreenActiveOriginal;
